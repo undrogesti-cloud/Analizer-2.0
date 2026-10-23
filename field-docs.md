@@ -39,7 +39,9 @@ Qué significa cada campo que aparece en la app (`streamlit run src/analizer/app
 | Columna | Significado |
 |---|---|
 | `posicion` | Puesto dentro de su municipio, de mayor a menor puntuación. |
-| `municipio` | Municipio del escaneo. |
+| `codigo_ine` | Código INE de 5 cifras del municipio. Es lo que distingue a dos municipios que se llaman igual. |
+| `municipio` | Municipio del escaneo, con el nombre oficial del INE. |
+| `provincia` | Provincia del municipio. |
 | `nombre` | Nombre del negocio en OpenStreetMap. |
 | `tipo` | Categoría OSM en inglés (`restaurant`, `dentist`, `hairdresser`, `car_repair`…). Determina el `ticket` y si el negocio necesita reservas. |
 | `probabilidad` | Estimación de 0 a 1 de que el negocio acepte una web nueva o un rediseño. Se calcula como `1 / (1 + e^-(−1,5 + p_necesidad + p_pago + p_penalizacion + p_contacto))`. Los pesos son una estimación inicial: hay que recalibrarlos con los resultados reales de contacto. |

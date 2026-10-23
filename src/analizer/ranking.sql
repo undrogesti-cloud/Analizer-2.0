@@ -24,13 +24,16 @@ SELECT * FROM (VALUES
 CREATE OR REPLACE VIEW ranking AS
 WITH base AS (
     SELECT
-        n.*,
+        n.* EXCLUDE (municipio),
+        coalesce(m.municipio, n.municipio) AS municipio,
+        m.provincia,
         w.* EXCLUDE (osm_id),
         coalesce(s.ticket, 'medio') AS ticket,
         coalesce(s.necesita_reserva, false) AS necesita_reserva,
         year(current_date) AS anio
     FROM negocios n
     LEFT JOIN webs w USING (osm_id)
+    LEFT JOIN municipios m USING (codigo_ine)
     LEFT JOIN sectores s USING (tipo)
 ),
 senales AS (
@@ -134,8 +137,10 @@ observaciones AS (
     FROM propuestas
 )
 SELECT
-    row_number() OVER (PARTITION BY municipio ORDER BY puntos_total DESC, nombre) AS posicion,
+    row_number() OVER (PARTITION BY codigo_ine ORDER BY puntos_total DESC, nombre) AS posicion,
+    codigo_ine,
     municipio,
+    provincia,
     nombre,
     tipo,
     ticket,
@@ -185,11 +190,13 @@ FROM (
         1 / (1 + exp(-(-1.5 + p_necesidad + p_pago + p_penalizacion + p_contacto))) AS probabilidad
     FROM observaciones
 )
-ORDER BY municipio, posicion;
+ORDER BY municipio, codigo_ine, posicion;
 
 CREATE OR REPLACE VIEW ranking_municipio AS
 SELECT
+    codigo_ine,
     municipio,
+    provincia,
     count(*) AS negocios,
     count(*) FILTER (estado_web = 'sin_web') AS sin_web,
     count(*) FILTER (estado_web IN ('ok', 'aparcada')) AS con_web,
@@ -198,5 +205,5 @@ SELECT
     round(sum(probabilidad), 1) AS leads_esperados,
     round(sum(probabilidad * CASE ticket WHEN 'alto' THEN 1500 WHEN 'medio' THEN 800 ELSE 400 END)) AS valor_esperado_eur
 FROM ranking
-GROUP BY municipio
+GROUP BY codigo_ine, municipio, provincia
 ORDER BY leads_esperados DESC;

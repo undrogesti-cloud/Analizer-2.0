@@ -5,6 +5,7 @@ Busca los negocios de un municipio en OpenStreetMap, localiza y analiza su web y
 - [scan.py](src/analizer/scan.py): escanea un municipio y guarda los datos en DuckDB.
 - [ranking.sql](src/analizer/ranking.sql): calcula la puntuación, la prioridad y los argumentos de venta.
 - [app.py](src/analizer/app.py): visor del ranking con filtros, mapa y descarga a Excel.
+- [Configurar análisis](src/analizer/pages/1_Configurar_análisis.py): página del visor para elegir municipios de España (tabla `municipios` de DuckDB, que se carga desde la lista del INE en [municipios.csv](src/analizer/municipios.csv)) y las señales a tener en cuenta. Guarda la selección como un CSV por municipio con su nombre (`data/processed/seleccion/Serra.csv`) y genera los comandos de escaneo.
 - [field-docs.md](field-docs.md): qué significa cada campo de la app y del Excel.
 
 ## Requisitos
@@ -36,15 +37,18 @@ export UV_PROJECT_ENVIRONMENT="$HOME/.venvs/analizer"
 ### 1. Escanear un municipio
 
 ```bash
-uv run python -m analizer.scan --municipio Serra --provincia Valencia
+uv run python -m analizer.scan --codigo-ine 46228                     # por código INE
+uv run python -m analizer.scan --municipio Serra --provincia Valencia  # o por nombre
 ```
 
 Tarda unos minutos según el número de negocios. Guarda:
 
-- `data/raw/negocios_<municipio>.json` y `data/raw/webs_<municipio>.json`: datos en bruto.
-- `data/processed/analizer.duckdb`: base de datos con las tablas `negocios`, `webs` y `escaneos`, y las vistas `ranking` y `ranking_municipio`.
+- `data/raw/negocios_<codigo_ine>.json` y `data/raw/webs_<codigo_ine>.json`: datos en bruto.
+- `data/processed/analizer.duckdb`: base de datos con las tablas `municipios`, `negocios`, `webs` y `escaneos`, y las vistas `ranking` y `ranking_municipio`.
 
-Puedes escanear varios municipios, uno por ejecución; se acumulan en la misma base de datos. Volver a escanear un municipio sustituye sus datos anteriores.
+Puedes escanear varios municipios, uno por ejecución; se acumulan en la misma base de datos. Volver a escanear un municipio sustituye todos sus datos anteriores, incluidos los negocios que ya no están en OSM.
+
+El nombre se busca en la tabla `municipios` sin distinguir tildes ni mayúsculas, y vale cualquiera de las dos formas de los nombres bilingües (`Valencia` o `València`). Si hay varios municipios con ese nombre (Cieza está en Murcia y en Cantabria), el script los lista y pide `--codigo-ine`. La página *Configurar análisis* genera ya los comandos con el código.
 
 Si Overpass no responde, el script prueba varios servidores y, si todos fallan, termina con `Overpass no responde; prueba más tarde`.
 

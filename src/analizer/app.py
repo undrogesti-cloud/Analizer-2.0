@@ -22,12 +22,15 @@ if not DB_PATH.exists():
 con = duckdb.connect(DB_PATH, read_only=True)
 ranking = con.sql("SELECT * FROM ranking").df()
 resumen = con.sql("SELECT * FROM ranking_municipio").df()
-ultimo = con.sql("SELECT municipio, max(fecha) AS fecha FROM escaneos GROUP BY ALL").df()
+ultimo = con.sql("""SELECT codigo_ine, coalesce(m.municipio, e.municipio) AS municipio, m.provincia, max(fecha) AS fecha
+                   FROM escaneos e LEFT JOIN municipios m USING (codigo_ine) GROUP BY ALL""").df()
 con.close()
 
-municipios = sorted(ranking["municipio"].unique())
+# Por código INE: hay municipios con el mismo nombre en provincias distintas
+etiquetas = resumen.set_index("codigo_ine").apply(lambda r: f"{r.municipio} ({r.provincia})", axis=1)
+municipios = sorted(etiquetas.index, key=etiquetas.get)
 with st.sidebar:
-    sel_mun = st.multiselect("Municipio", municipios, default=municipios)
+    sel_mun = st.multiselect("Municipio", municipios, default=municipios, format_func=etiquetas.get)
     sel_pri = st.multiselect("Prioridad", ["caliente", "templado", "frio"], default=["caliente", "templado"])
     sel_est = st.multiselect("Estado web", sorted(ranking["estado_web"].unique()),
                              default=sorted(ranking["estado_web"].unique()))
@@ -35,7 +38,7 @@ with st.sidebar:
     p_min = st.slider("Probabilidad mínima", 0.0, 1.0, 0.0, 0.05)
 
 vista = ranking[
-    ranking["municipio"].isin(sel_mun)
+    ranking["codigo_ine"].isin(sel_mun)
     & ranking["prioridad"].isin(sel_pri)
     & ranking["estado_web"].isin(sel_est)
     & (ranking["probabilidad"] >= p_min)
@@ -44,7 +47,7 @@ if solo_contacto:
     vista = vista[vista["telefono"].notna() | vista["email"].notna()]
 
 st.subheader("Resumen por municipio")
-st.dataframe(resumen[resumen["municipio"].isin(sel_mun)], hide_index=True, width="stretch")
+st.dataframe(resumen[resumen["codigo_ine"].isin(sel_mun)], hide_index=True, width="stretch")
 
 c1, c2, c3, c4 = st.columns(4)
 c1.metric("Negocios filtrados", len(vista))
@@ -53,7 +56,7 @@ c3.metric("Leads esperados (Σp)", f"{vista['probabilidad'].sum():.1f}")
 c4.metric("Sin web", int((vista["estado_web"] == "sin_web").sum()))
 
 st.subheader("Ranking")
-columnas = ["posicion", "municipio", "nombre", "tipo", "probabilidad", "prioridad", "estado_web",
+columnas = ["posicion", "municipio", "provincia", "nombre", "tipo", "probabilidad", "prioridad", "estado_web",
             "web", "observaciones", "telefono", "email", "direccion", "argumentos_venta", "frenos"]
 st.dataframe(
     vista[columnas],
@@ -88,7 +91,7 @@ def to_excel() -> bytes:
     buf = BytesIO()
     with pd.ExcelWriter(buf, engine="openpyxl") as xls:
         vista.drop(columns=["lat", "lon"]).to_excel(xls, sheet_name="Ranking", index=False)
-        resumen[resumen["municipio"].isin(sel_mun)].to_excel(xls, sheet_name="Por municipio", index=False)
+        resumen[resumen["codigo_ine"].isin(sel_mun)].to_excel(xls, sheet_name="Por municipio", index=False)
         criterios.to_excel(xls, sheet_name="Criterios", index=False)
         ultimo.to_excel(xls, sheet_name="Escaneos", index=False)
         for ws in xls.sheets.values():

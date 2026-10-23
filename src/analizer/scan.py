@@ -2,6 +2,7 @@
 las señales en DuckDB para el ranking de `ranking.sql`.
 
 Uso:
+    python -m analizer.scan --codigo-ine 46228
     python -m analizer.scan --municipio Serra --provincia Valencia
 """
 
@@ -23,6 +24,11 @@ ROOT = Path(__file__).resolve().parents[2]
 DB_PATH = ROOT / "data" / "processed" / "analizer.duckdb"
 RAW_DIR = ROOT / "data" / "raw"
 SQL_PATH = Path(__file__).with_name("ranking.sql")
+# Opcional: diccionario de municipios del INE (codigo_ine,municipio,provincia,comunidad) para actualizar la tabla
+MUNICIPIOS_CSV = Path(__file__).with_name("municipios.csv")
+# Tipos de las columnas no textuales que pueden llegar vacías en un escaneo (el resto es VARCHAR)
+COLUMN_TYPES = {"jquery_version": "DOUBLE", "wp_version": "DOUBLE", "anio_copyright": "BIGINT",
+                "anio_agencia": "BIGINT", "lat": "DOUBLE", "lon": "DOUBLE"}
 
 UA = "Mozilla/5.0 (compatible; analizer/0.1)"
 API_UA = "analizer/0.1"
@@ -116,7 +122,7 @@ def find_municipality(name: str, province: str) -> dict:
     raise SystemExit(f"No encuentro el municipio {name} ({province}) en OSM")
 
 
-def to_rows(elements: list[dict], municipio: str) -> list[dict]:
+def to_rows(elements: list[dict], municipio: str, codigo_ine: str) -> list[dict]:
     rows = []
     for e in elements:
         tags = e.get("tags", {})
@@ -137,6 +143,7 @@ def to_rows(elements: list[dict], municipio: str) -> list[dict]:
             "cp": tags.get("addr:postcode"),
             "marca": tags.get("brand") or tags.get("operator"),
             "municipio": municipio,
+            "codigo_ine": codigo_ine,
             "lat": lat,
             "lon": lon,
         })
@@ -284,37 +291,98 @@ async def analyze_all(rows: list[dict], municipio: str) -> list[dict]:
         return await asyncio.gather(*(analyze(client, sem, r, municipio) for r in rows))
 
 
-def save(rows: list[dict], webs: list[dict], municipio: str) -> None:
+def load_municipios(con: duckdb.DuckDBPyConnection) -> None:
+    """Crea la tabla `municipios`; si hay un `municipios.csv` nuevo del INE, aplica sus altas y cambios de nombre."""
+    con.execute("""CREATE TABLE IF NOT EXISTS municipios (
+        codigo_ine VARCHAR PRIMARY KEY, municipio VARCHAR NOT NULL,
+        provincia VARCHAR NOT NULL, comunidad VARCHAR NOT NULL)""")
+    if MUNICIPIOS_CSV.exists():
+        con.execute("INSERT OR REPLACE INTO municipios SELECT * FROM read_csv(?, header=true, all_varchar=true)",
+                    [str(MUNICIPIOS_CSV)])
+    elif not con.execute("SELECT count(*) FROM municipios").fetchall()[0][0]:
+        raise RuntimeError(f"La tabla municipios está vacía: copia el diccionario del INE en {MUNICIPIOS_CSV}")
+
+
+def init_db(con: duckdb.DuckDBPyConnection) -> None:
+    """Deja la base de datos al día: municipios, columna `codigo_ine` y vistas del ranking."""
+    load_municipios(con)
+    con.execute("CREATE TABLE IF NOT EXISTS escaneos (municipio VARCHAR, codigo_ine VARCHAR, fecha TIMESTAMP)")
+    # Una columna vacía en el primer escaneo se crea con tipo NULL y rechazaría los datos de los siguientes
+    vacias = con.execute("""SELECT table_name, column_name FROM duckdb_columns()
+        WHERE table_name IN ('negocios', 'webs') AND trim(data_type, '"') = 'NULL'""").fetchall()
+    for table, column in vacias:
+        con.execute(f'ALTER TABLE {table} ALTER "{column}" TYPE {COLUMN_TYPES.get(column, "VARCHAR")}')
+    tablas = {t for (t,) in con.execute("SELECT table_name FROM duckdb_tables()").fetchall()}
+    for table in {"negocios", "escaneos"} & tablas:
+        con.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS codigo_ine VARCHAR")
+        # Filas de antes del código INE: se enlazan por nombre solo si no hay otro municipio que se llame igual
+        con.execute(f"""UPDATE {table} t SET codigo_ine = m.codigo_ine
+            FROM (SELECT municipio, any_value(codigo_ine) AS codigo_ine FROM municipios
+                  GROUP BY municipio HAVING count(*) = 1) m
+            WHERE t.codigo_ine IS NULL AND t.municipio = m.municipio""")
+    if {"negocios", "webs"} <= tablas:
+        con.execute(SQL_PATH.read_text())
+
+
+def resolve_municipio(codigo_ine: str | None, nombre: str | None, provincia: str | None) -> dict:
+    """Busca el municipio en la tabla del INE por código o por nombre (sin tildes ni mayúsculas)."""
     DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with duckdb.connect(DB_PATH) as con:
+        load_municipios(con)
+        # Los nombres bilingües ("Alicante/Alacant") valen por cualquiera de sus partes
+        hits = con.execute("""SELECT codigo_ine, municipio, provincia FROM municipios
+            WHERE codigo_ine = $codigo
+               OR (list_contains(string_split(strip_accents(lower(municipio)), '/'), strip_accents(lower($nombre)))
+                   AND ($provincia IS NULL OR list_contains(string_split(strip_accents(lower(provincia)), '/'),
+                                                            strip_accents(lower($provincia)))))
+            ORDER BY codigo_ine""", {"codigo": codigo_ine, "nombre": nombre, "provincia": provincia}).fetchall()
+    if not hits:
+        raise SystemExit(f"No encuentro el municipio {codigo_ine or nombre} en la lista del INE")
+    if len(hits) > 1:
+        raise SystemExit("Hay varios municipios con ese nombre; usa --codigo-ine:\n"
+                         + "\n".join(f"  {c}  {m} ({p})" for c, m, p in hits))
+    return dict(zip(("codigo_ine", "municipio", "provincia"), hits[0]))
+
+
+def save(rows: list[dict], webs: list[dict], mun: dict) -> None:
     con = duckdb.connect(DB_PATH)
-    neg_json = RAW_DIR / f"negocios_{slug(municipio).replace(' ', '_')}.json"
-    web_json = RAW_DIR / f"webs_{slug(municipio).replace(' ', '_')}.json"
+    neg_json = RAW_DIR / f"negocios_{mun['codigo_ine']}.json"
+    web_json = RAW_DIR / f"webs_{mun['codigo_ine']}.json"
     neg_json.write_text(json.dumps(rows, ensure_ascii=False))
     web_json.write_text(json.dumps(webs, ensure_ascii=False))
     for table, path in (("negocios", neg_json), ("webs", web_json)):
         con.execute(f"CREATE TABLE IF NOT EXISTS {table} AS SELECT * FROM read_json_auto(?) LIMIT 0", [str(path)])
-        # Re-escanear un municipio sustituye sus filas anteriores
-        con.execute(f"""DELETE FROM {table} WHERE osm_id IN (SELECT osm_id FROM read_json_auto(?))""", [str(path)])
+    init_db(con)
+    # Re-escanear un municipio sustituye todas sus filas anteriores, también las de negocios que ya no están en OSM
+    viejos = "SELECT osm_id FROM negocios WHERE codigo_ine = $codigo UNION SELECT osm_id FROM read_json_auto($path)"
+    con.execute(f"DELETE FROM webs WHERE osm_id IN ({viejos})", {"codigo": mun["codigo_ine"], "path": str(neg_json)})
+    con.execute(f"DELETE FROM negocios WHERE osm_id IN ({viejos})", {"codigo": mun["codigo_ine"], "path": str(neg_json)})
+    for table, path in (("negocios", neg_json), ("webs", web_json)):
         con.execute(f"INSERT INTO {table} BY NAME SELECT * FROM read_json_auto(?, union_by_name=true)", [str(path)])
-    con.execute("CREATE TABLE IF NOT EXISTS escaneos (municipio VARCHAR, fecha TIMESTAMP)")
-    con.execute("INSERT INTO escaneos VALUES (?, now())", [municipio])
-    con.execute(SQL_PATH.read_text())
+    con.execute("INSERT INTO escaneos BY NAME SELECT ? AS municipio, ? AS codigo_ine, now() AS fecha",
+                [mun["municipio"], mun["codigo_ine"]])
     con.close()
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--municipio", required=True)
-    ap.add_argument("--provincia", required=True)
+    ap.add_argument("--codigo-ine", help="código INE de 5 cifras; evita confusiones entre municipios homónimos")
+    ap.add_argument("--municipio")
+    ap.add_argument("--provincia")
     args = ap.parse_args()
+    if not (args.codigo_ine or args.municipio):
+        ap.error("indica --codigo-ine o --municipio")
 
-    hit = find_municipality(args.municipio, args.provincia)
-    print(f"Municipio: {hit['display_name']}")
-    rows = to_rows(overpass_businesses(int(hit["osm_id"])), args.municipio)
+    mun = resolve_municipio(args.codigo_ine, args.municipio, args.provincia)
+    # Para Nominatim y para reconocer el municipio en las webs basta con el primer nombre de los bilingües
+    nombre, provincia = mun["municipio"].split("/")[0], mun["provincia"].split("/")[0]
+    hit = find_municipality(nombre, provincia)
+    print(f"Municipio: {mun['codigo_ine']} · {hit['display_name']}")
+    rows = to_rows(overpass_businesses(int(hit["osm_id"])), mun["municipio"], mun["codigo_ine"])
     print(f"{len(rows)} negocios en OSM; analizando webs...")
-    webs = asyncio.run(analyze_all(rows, args.municipio))
+    webs = asyncio.run(analyze_all(rows, nombre))
     print(f"{sum(w['estado'] != 'sin_web' for w in webs)} webs encontradas")
-    save(rows, webs, args.municipio)
+    save(rows, webs, mun)
     print(f"Guardado en {DB_PATH}")
 
 
