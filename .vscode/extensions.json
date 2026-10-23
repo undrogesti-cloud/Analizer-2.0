@@ -1,0 +1,12 @@
+{
+  "recommendations": [
+    "ms-python.python",
+    "ms-toolsai.jupyter",
+    "charliermarsh.ruff",
+    "detachhead.basedpyright",
+    "mechatroner.rainbow-csv",
+    "tamasfe.even-better-toml",
+    "mtxr.sqltools",
+    "maksimpeterburgskiy.duckdb-for-sqltools"
+  ]
+}
