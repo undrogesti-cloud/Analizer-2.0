@@ -1,0 +1,15 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+.ipynb_checkpoints/
+
+# Datos (no subir descargas ni bases de datos)
+data/raw/*
+data/processed/*
+!data/**/.gitkeep
+*.duckdb
+cache/
+
+# Secretos
+.env
